@@ -1,0 +1,33 @@
+name: Debian 12 packages
+
+on:
+  push:
+    branches:
+      - local_deb_repo
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  debian12:
+    name: bookworm amd64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build Debian 12 packages
+        run: docker build -t sems-deb12 -f Dockerfile-debian12 .
+
+      - name: Extract .deb packages
+        run: |
+          mkdir -p debs
+          docker run --rm --entrypoint bash \
+            -v "$PWD/debs:/out" sems-deb12 \
+            -lc 'cp -a /debs/*.deb /out/ && ls -al /out && /usr/sbin/sems -v'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sems-debian12-debs
+          path: debs/*.deb
+          if-no-files-found: error
