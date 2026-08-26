@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - local_deb_repo
   pull_request:
     branches:
       - master
@@ -13,7 +14,31 @@ permissions:
   contents: read
 
 jobs:
+  debian12:
+    name: Debian 12 packages
+    if: github.ref == 'refs/heads/local_deb_repo' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build Debian 12 image
+        run: docker build -t sems-deb12 -f Dockerfile-debian12 .
+
+      - name: Extract .deb packages
+        run: |
+          mkdir -p debs
+          docker run --rm --entrypoint bash \
+            -v "$PWD/debs:/out" sems-deb12 \
+            -lc 'cp -a /debs/*.deb /out/ && ls -al /out && /usr/sbin/sems -v'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sems-debian12-debs
+          path: debs/*.deb
+          if-no-files-found: error
+
   rpm_test_build:
+    if: github.ref == 'refs/heads/master' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
 
     steps:
@@ -33,6 +58,7 @@ jobs:
         run: docker build -t sems_el10 -f Dockerfile-rhel10 .
 
   deb_test_build:
+    if: github.ref == 'refs/heads/master' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
 
     steps:
@@ -49,6 +75,7 @@ jobs:
         run: docker build -t sems_deb13 -f Dockerfile-debian13 .
 
   hardened_builds:
+    if: github.ref == 'refs/heads/master' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     name: Hardened build (${{ matrix.flavor }})
     strategy:
