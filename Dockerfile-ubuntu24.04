@@ -2,32 +2,42 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update
-RUN apt-get install -y \
-         git debhelper g++ make libspandsp-dev flite1-dev \
-         libspeex-dev libgsm1-dev libopus-dev libssl-dev python3-dev \
-         python3-sip-dev libev-dev \
-         openssl libmysqlcppconn-dev libevent-dev \
-         libxml2-dev libcurl4-openssl-dev libhiredis-dev \
-         libsamplerate-dev libmp3lame-dev libcodec2-dev \
-         cmake dh-cmake dh-cmake-compat dh-sequence-cmake \
-         cargo rustc
+# Build dependencies. Package names drift between releases, so every image keeps
+# its own list, but the grouping is the same everywhere: packaging tools, then
+# toolchain, then python, then codecs, then libraries.
+RUN apt-get update && apt-get install -y \
+        git \
+        debhelper devscripts \
+        g++ make cmake \
+        dh-cmake dh-cmake-compat dh-sequence-cmake \
+        python3-dev python3-sip-dev \
+        openssl libssl-dev \
+        libspandsp-dev flite1-dev libspeex-dev libgsm1-dev libopus-dev \
+        libsamplerate-dev libmp3lame-dev libcodec2-dev libbcg729-dev \
+        libev-dev libevent-dev libxml2-dev libcurl4-openssl-dev \
+        libhiredis-dev libmysqlcppconn-dev \
+        cargo rustc \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get install -y \
-         devscripts libbcg729-dev
 COPY . /sems
 WORKDIR /sems
 
+# Unit tests gate the package build.
 RUN mkdir -p build && cd build && cmake .. && make sems_tests && ./core/sems_tests
+
+# noble matches Debian 12, so it reuses the bookworm packaging.
 RUN ln -s pkg/deb/bookworm ./debian
+
 # PKG_VERSION from CI makes successive builds upgradable via apt (apt compares
 # version strings only). Falls back to VERSION for a plain local build.
 ARG PKG_VERSION=
 RUN v="${PKG_VERSION:-$(cat VERSION)}" && \
     DEBEMAIL="ci@localhost" DEBFULLNAME="CI" dch -b -v "$v" "sems"
-RUN dpkg-buildpackage -rfakeroot -us -uc
-RUN ls -al ..
 
+RUN dpkg-buildpackage -rfakeroot -us -uc
+
+# Prove the package installs and the binary runs, then keep it at a stable path
+# for the CI extract step.
 RUN dpkg -i ../sems_*.deb
 RUN /usr/sbin/sems -v
 RUN mkdir -p /debs && cp -a ../*.deb /debs/ && ls -al /debs
