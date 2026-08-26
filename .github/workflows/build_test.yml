@@ -14,27 +14,117 @@ permissions:
   contents: read
 
 jobs:
-  debian12:
-    name: Debian 12 packages
-    if: github.ref == 'refs/heads/local_deb_repo' || github.event_name == 'workflow_dispatch'
+  list_deb_dockerfiles:
+    name: Discover Debian/Ubuntu Dockerfiles
+    if: github.ref == 'refs/heads/local_deb_repo'
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: set
+        run: |
+          python3 <<'PY'
+          import glob, json, os
+          files = sorted(
+              glob.glob("Dockerfile-debian[0-9]*")
+              + glob.glob("Dockerfile-ubuntu*")
+          )
+          include = [{"dockerfile": f, "distro": f.replace("Dockerfile-", "")} for f in files]
+          if not include:
+              raise SystemExit("no Dockerfile-debian* / Dockerfile-ubuntu* found")
+          print("distros:", ", ".join(row["distro"] for row in include))
+          matrix = json.dumps({"include": include}, separators=(",", ":"))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"matrix={matrix}\n")
+          PY
+
+  apt_build:
+    name: apt ${{ matrix.distro }}
+    if: github.ref == 'refs/heads/local_deb_repo'
+    needs: list_deb_dockerfiles
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.list_deb_dockerfiles.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v5
 
-      - name: Build Debian 12 image
-        run: docker build -t sems-deb12 -f Dockerfile-debian12 .
+      - name: Build ${{ matrix.dockerfile }}
+        run: docker build -t "sems-${{ matrix.distro }}" -f "${{ matrix.dockerfile }}" .
 
       - name: Extract .deb packages
         run: |
           mkdir -p debs
           docker run --rm --entrypoint bash \
-            -v "$PWD/debs:/out" sems-deb12 \
+            -v "$PWD/debs:/out" "sems-${{ matrix.distro }}" \
             -lc 'cp -a /debs/*.deb /out/ && ls -al /out && /usr/sbin/sems -v'
 
       - uses: actions/upload-artifact@v4
         with:
-          name: sems-debian12-debs
+          name: sems-${{ matrix.distro }}-debs
           path: debs/*.deb
+          if-no-files-found: error
+
+  apt_assemble:
+    name: Assemble apt repo
+    if: always() && !cancelled() && github.ref == 'refs/heads/local_deb_repo'
+    needs: apt_build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sems-*-debs
+          path: collected
+
+      - name: Build per-distro apt indexes
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev apt-utils
+          mkdir -p apt-repo
+          found=0
+          for dir in collected/sems-*-debs; do
+            [ -d "$dir" ] || continue
+            distro="${dir#collected/sems-}"
+            distro="${distro%-debs}"
+            dest="apt-repo/${distro}"
+            mkdir -p "$dest"
+            cp -a "$dir"/*.deb "$dest"/
+            (
+              cd "$dest"
+              dpkg-scanpackages --multiversion . > Packages
+              gzip -9kf Packages
+              apt-ftparchive \
+                -o APT::FTPArchive::Release::Origin=denyspozniak \
+                -o APT::FTPArchive::Release::Label=sems \
+                -o APT::FTPArchive::Release::Suite="$distro" \
+                -o APT::FTPArchive::Release::Codename="$distro" \
+                -o APT::FTPArchive::Release::Architectures=amd64 \
+                -o APT::FTPArchive::Release::Components=main \
+                release . > Release
+            )
+            found=1
+            echo "indexed ${distro}:"
+            ls -al "$dest"
+          done
+          [ "$found" = 1 ] || { echo "no .deb artifacts to index"; exit 1; }
+          {
+            echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>sems apt</title></head><body>'
+            echo '<h1>sems apt repo</h1><p>Pick the distro matching the host:</p><pre>'
+            for dest in apt-repo/*/; do
+              distro="$(basename "$dest")"
+              echo "echo \"deb [trusted=yes] https://HOST/${distro} ./\" | sudo tee /etc/apt/sources.list.d/sems.list"
+              echo "sudo apt update && sudo apt install sems   # ${distro}"
+              echo
+            done
+            echo '</pre></body></html>'
+          } > apt-repo/index.html
+          find apt-repo -type f | sort
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apt-repo
+          path: apt-repo
           if-no-files-found: error
 
   rpm_test_build:

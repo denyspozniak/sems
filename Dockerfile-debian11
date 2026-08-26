@@ -25,6 +25,7 @@ RUN ls -al ..
 
 RUN dpkg -i ../sems_*.deb
 RUN /usr/sbin/sems -v
+RUN mkdir -p /debs && cp -a ../*.deb /debs/ && ls -al /debs
 
 # Run SEMS with the specified configuration
 CMD ["/usr/sbin/sems", "-E", "-f", "/etc/sems/sems.conf"]
