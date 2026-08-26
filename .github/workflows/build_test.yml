@@ -127,6 +127,58 @@ jobs:
           path: apt-repo
           if-no-files-found: error
 
+  # Publish the apt tree assembled above on GitHub Pages. Reuses the artifact
+  # from this same run, so no image is built twice. Deliberately not a separate
+  # workflow: a workflow_run trigger is only read from the default branch, so
+  # it would never fire while this lives on local_deb_repo.
+  #
+  # One-time setup: repo Settings -> Pages -> Source: GitHub Actions.
+  #
+  # needs lists apt_build too, so a distro failing skips the deploy instead of
+  # publishing a repo that silently lost one of its suites (apt_assemble runs
+  # on always() and would happily index a partial set).
+  deploy_pages:
+    name: Deploy apt repo to Pages
+    if: github.ref == 'refs/heads/local_deb_repo'
+    needs: [apt_build, apt_assemble]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: apt-repo
+          path: apt-repo
+
+      - name: Prepare Pages tree
+        run: |
+          # Keep Pages from treating _-prefixed paths as Jekyll internals.
+          touch apt-repo/.nojekyll
+          # apt_assemble writes a HOST placeholder because it does not know
+          # where the tree gets published; fill in the project page URL.
+          # github.repository is "owner/repo" on every event type, unlike
+          # github.event.repository which depends on the payload shape.
+          repo="${{ github.repository }}"
+          base="https://${{ github.repository_owner }}.github.io/${repo#*/}"
+          sed -i "s|https://HOST|${base}|g" apt-repo/index.html
+          cat apt-repo/index.html
+          find apt-repo -type f | sort
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: apt-repo
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
   rpm_test_build:
     if: github.ref == 'refs/heads/master' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
