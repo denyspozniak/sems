@@ -50,8 +50,26 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # apt decides whether to upgrade purely by comparing version strings, so a
+      # rebuilt 2.1.0 is invisible to clients. Derive a monotonic version instead:
+      # run_number always increases, and run_attempt disambiguates re-runs of the
+      # same commit. '+' sorts after the bare version, '~<suite>' keeps the five
+      # per-suite builds distinguishable.
+      - name: Compute package version
+        id: ver
+        run: |
+          set -eu
+          suffix="ci${{ github.run_number }}"
+          [ "${{ github.run_attempt }}" = "1" ] || suffix="${suffix}.${{ github.run_attempt }}"
+          version="$(cat VERSION)+${suffix}~${{ matrix.distro }}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "package version: ${version}"
+
       - name: Build ${{ matrix.dockerfile }}
-        run: docker build -t "sems-${{ matrix.distro }}" -f "${{ matrix.dockerfile }}" .
+        run: |
+          docker build -t "sems-${{ matrix.distro }}" \
+            --build-arg "PKG_VERSION=${{ steps.ver.outputs.version }}" \
+            -f "${{ matrix.dockerfile }}" .
 
       - name: Extract .deb packages
         run: |

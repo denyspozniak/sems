@@ -19,7 +19,11 @@ WORKDIR /sems
 
 RUN mkdir -p build && cd build && cmake .. && make sems_tests && ./core/sems_tests
 RUN ln -s pkg/deb/bullseye ./debian
-RUN dch -b -v $(cat VERSION) "sems"
+# PKG_VERSION from CI makes successive builds upgradable via apt (apt compares
+# version strings only). Falls back to VERSION for a plain local build.
+ARG PKG_VERSION=
+RUN v="${PKG_VERSION:-$(cat VERSION)}" && \
+    DEBEMAIL="ci@localhost" DEBFULLNAME="CI" dch -b -v "$v" "sems"
 RUN dpkg-buildpackage -rfakeroot -us -uc
 RUN ls -al ..
 
