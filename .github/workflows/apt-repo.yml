@@ -1,0 +1,86 @@
+name: Debian apt repo
+
+# Build bookworm .deb packages and publish a flat apt repo on GitHub Pages:
+#   https://denyspozniak.github.io/sems/
+#
+# One-time: repo Settings → Pages → Source: GitHub Actions.
+# Client:
+#   echo "deb [trusted=yes] https://denyspozniak.github.io/sems ./" \
+#     | sudo tee /etc/apt/sources.list.d/sems.list
+#   sudo apt update && sudo apt install sems
+
+on:
+  push:
+    branches:
+      - local_deb_repo
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build Debian 12 packages
+        run: docker build -t sems-deb12 -f Dockerfile-debian12 .
+
+      - name: Extract .deb packages
+        run: |
+          mkdir -p repo
+          docker run --rm --entrypoint bash \
+            -v "$PWD/repo:/out" sems-deb12 \
+            -lc 'cp -a /debs/*.deb /out/ && ls -al /out'
+
+      - name: Build apt index
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev apt-utils
+          cd repo
+          touch .nojekyll
+          dpkg-scanpackages --multiversion . > Packages
+          gzip -9kf Packages
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin=denyspozniak \
+            -o APT::FTPArchive::Release::Label=sems \
+            -o APT::FTPArchive::Release::Suite=bookworm \
+            -o APT::FTPArchive::Release::Codename=bookworm \
+            -o APT::FTPArchive::Release::Architectures=amd64 \
+            -o APT::FTPArchive::Release::Components=main \
+            release . > Release
+          cat > index.html <<'EOF'
+          <!DOCTYPE html>
+          <html><head><meta charset="utf-8"><title>sems apt repo</title></head>
+          <body>
+          <h1>sems (Debian 12 / bookworm)</h1>
+          <pre>
+          echo "deb [trusted=yes] https://denyspozniak.github.io/sems ./" \
+            | sudo tee /etc/apt/sources.list.d/sems.list
+          sudo apt update
+          sudo apt install sems
+          </pre>
+          </body></html>
+          EOF
+          ls -al
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: repo
+
+  deploy:
+    needs: build-deb
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

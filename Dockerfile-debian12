@@ -24,6 +24,8 @@ RUN ls -al ..
 
 RUN dpkg -i ../sems_*.deb
 RUN /usr/sbin/sems -v
+# Keep built packages in a stable path for CI extract (apt-repo workflow).
+RUN mkdir -p /debs && cp -a ../*.deb /debs/ && ls -al /debs
 
 # Run SEMS with the specified configuration
 CMD ["/usr/sbin/sems", "-E", "-f", "/etc/sems/sems.conf"]
