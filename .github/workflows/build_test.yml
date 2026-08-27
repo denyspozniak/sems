@@ -427,6 +427,12 @@ jobs:
       - name: Build image based on Debian 13
         run: docker build -t sems_deb13 -f Dockerfile-debian13 .
 
+      - name: Build image based on Ubuntu 22.04
+        run: docker build -t sems_ubuntu2204 -f Dockerfile-ubuntu22.04 .
+
+      - name: Build image based on Ubuntu 24.04
+        run: docker build -t sems_ubuntu2404 -f Dockerfile-ubuntu24.04 .
+
   hardened_builds:
     if: github.ref == 'refs/heads/master' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
