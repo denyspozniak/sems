@@ -107,7 +107,13 @@ jobs:
             distro="${distro%-debs}"
             dest="apt-repo/${distro}"
             mkdir -p "$dest"
-            cp -a "$dir"/*.deb "$dest"/
+            # Debug symbols are ~90% of the payload (45 MB of 50 MB per suite).
+            # They stay in the artifacts, but publishing them would spend the
+            # Pages quota on something almost nobody installs.
+            for deb in "$dir"/*.deb; do
+              case "${deb##*/}" in *-dbg_*|*-dbgsym_*) continue ;; esac
+              cp -a "$deb" "$dest"/
+            done
             (
               cd "$dest"
               dpkg-scanpackages --multiversion . > Packages
