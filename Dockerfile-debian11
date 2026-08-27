@@ -2,6 +2,10 @@ FROM debian:11
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# The distro mirror drops connections often enough to break a 300+ MB
+# install; retry the individual fetch instead of failing the whole layer.
+RUN echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries
+
 # Build dependencies. Package names drift between releases, so every image keeps
 # its own list, but the grouping is the same everywhere: packaging tools, then
 # toolchain, then python, then codecs, then libraries.
