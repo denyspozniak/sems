@@ -2,13 +2,9 @@ FROM debian:11
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# The distro mirror drops connections often enough to break a 300+ MB
-# install; retry the individual fetch instead of failing the whole layer.
+# One dropped connection would otherwise fail a 300+ MB install.
 RUN echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries
 
-# Build dependencies. Package names drift between releases, so every image keeps
-# its own list, but the grouping is the same everywhere: packaging tools, then
-# toolchain, then python, then codecs, then libraries.
 RUN apt-get update && apt-get install -y \
         git \
         debhelper devscripts \
@@ -25,13 +21,11 @@ RUN apt-get update && apt-get install -y \
 COPY . /sems
 WORKDIR /sems
 
-# Unit tests gate the package build.
 RUN mkdir -p build && cd build && cmake .. && make sems_tests && ./core/sems_tests
 
 RUN ln -s pkg/deb/bullseye ./debian
 
-# PKG_VERSION from CI makes successive builds upgradable via apt (apt compares
-# version strings only). Falls back to VERSION for a plain local build.
+# CI stamps a unique version so apt sees an upgrade; VERSION is the fallback.
 ARG PKG_VERSION=
 RUN set -eu; \
     v="${PKG_VERSION:-$(cat VERSION)}"; \
@@ -43,11 +37,10 @@ RUN set -eu; \
     DEBEMAIL="ci@localhost" DEBFULLNAME="CI" dch -b -v "$v" "sems"
 
 RUN dpkg-buildpackage -rfakeroot -us -uc
+RUN ls -al ..
 
-# Prove the package installs and the binary runs, then keep it at a stable path
-# for the CI extract step.
 RUN dpkg -i ../sems_*.deb
 RUN /usr/sbin/sems -v
-RUN mkdir -p /debs && cp -a ../*.deb /debs/ && ls -al /debs
+RUN mkdir -p /debs && cp -a ../*.deb /debs/
 
 CMD ["/usr/sbin/sems", "-E", "-f", "/etc/sems/sems.conf"]

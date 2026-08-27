@@ -15,6 +15,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # How many builds of each package stay in the published index.
+  KEEP_VERSIONS: 3
+
 jobs:
   list_deb_dockerfiles:
     name: Discover Debian/Ubuntu Dockerfiles
@@ -100,7 +104,7 @@ jobs:
           mkdir -p debs
           docker run --rm --entrypoint bash \
             -v "$PWD/debs:/out" "sems-${{ matrix.distro }}" \
-            -lc 'cp -a /debs/*.deb /out/ && ls -al /out && /usr/sbin/sems -v'
+            -lc 'cp -a /debs/*.deb /out/'
 
       - uses: actions/upload-artifact@v4
         with:
@@ -127,7 +131,9 @@ jobs:
           # Where the current tree is published, so this run can carry it forward.
           repo="${{ github.repository }}"
           published="https://${{ github.repository_owner }}.github.io/${repo#*/}"
-          keep=3
+          # Debug symbols are ~90% of the payload; they stay in the artifacts
+          # but never reach the published index.
+          is_debug() { case "${1##*/}" in *-dbg_*|*-dbgsym_*) return 0 ;; esac; return 1; }
           found=0
           for dir in collected/sems-*-debs; do
             [ -d "$dir" ] || continue
@@ -135,11 +141,8 @@ jobs:
             distro="${distro%-debs}"
             dest="apt-repo/${distro}"
             mkdir -p "$dest"
-            # Debug symbols are ~90% of the payload (45 MB of 50 MB per suite).
-            # They stay in the artifacts, but publishing them would spend the
-            # Pages quota on something almost nobody installs.
             for deb in "$dir"/*.deb; do
-              case "${deb##*/}" in *-dbg_*|*-dbgsym_*) continue ;; esac
+              if is_debug "$deb"; then continue; fi
               cp -a "$deb" "$dest"/
             done
             # Carry the already published packages forward so a client can pin
@@ -147,7 +150,7 @@ jobs:
             # anything not re-uploaded here disappears from the index.
             if curl -fsSL "${published}/${distro}/Packages" -o prev-Packages; then
               awk '/^Filename: /{print $2}' prev-Packages | while read -r rel; do
-                case "${rel##*/}" in *-dbg_*|*-dbgsym_*) continue ;; esac
+                if is_debug "$rel"; then continue; fi
                 [ -e "$dest/${rel##*/}" ] && continue
                 curl -fsSL "${published}/${distro}/${rel#./}" \
                   -o "$dest/${rel##*/}" || rm -f "$dest/${rel##*/}"
@@ -158,7 +161,7 @@ jobs:
             fi
 
             # Keep the newest few versions of each package, dropping the rest.
-            python3 - "$dest" "$keep" <<'PRUNE'
+            python3 - "$dest" "$KEEP_VERSIONS" <<'PRUNE'
           import functools, os, subprocess, sys
           dest, keep = sys.argv[1], int(sys.argv[2])
           groups = {}
@@ -248,11 +251,10 @@ jobs:
             echo '<h1>sems apt repo</h1>'
             echo '<p><strong>These packages are not signed.</strong><br>'
             echo 'There is no GPG key and no InRelease file, so apt cannot verify'
-            echo 'who built them - that is why the line below needs'
-            echo '[trusted=yes].<br>'
-            echo 'Only the HTTPS transport is authenticated.<br>'
-            echo 'Use at your own risk, and do not point production hosts at this'
-            echo 'repository.</p>'
+            echo 'who produced them - hence [trusted=yes] on the source line'
+            echo 'below.<br>'
+            echo 'Only the HTTPS transport is authenticated; prefer a signed'
+            echo 'archive where package authenticity matters.</p>'
             echo '<p>The newest few builds of each package are kept; older ones'
             echo 'are removed when a new build is published.</p>'
             echo '<p>Browse the repository:'
@@ -320,8 +322,6 @@ jobs:
           repo="${{ github.repository }}"
           base="https://${{ github.repository_owner }}.github.io/${repo#*/}"
           sed -i "s|https://HOST|${base}|g" apt-repo/index.html
-          cat apt-repo/index.html
-          find apt-repo -type f | sort
 
       - uses: actions/upload-pages-artifact@v3
         with:
@@ -369,7 +369,6 @@ jobs:
           # change for existing hosts - assert them here so an accidental edit
           # fails the run instead of every subscriber's apt.
           curl -fsSL "${base}/Release" -o Release
-          cat Release
           grep -qx "Origin: sems" Release
           grep -qx "Label: sems" Release
           grep -qx "Suite: ${{ matrix.distro }}" Release
