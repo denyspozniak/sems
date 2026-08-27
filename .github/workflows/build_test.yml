@@ -362,6 +362,19 @@ jobs:
           done
           curl -fsSL "${base}/Packages" | grep -qx "Version: ${EXPECTED}"
 
+          # Origin, Label, Suite and Codename are stored by every client that
+          # has ever run apt update against this repository, and apt refuses to
+          # update when one of them changes until the user passes
+          # --allow-releaseinfo-change. Changing them is therefore a breaking
+          # change for existing hosts - assert them here so an accidental edit
+          # fails the run instead of every subscriber's apt.
+          curl -fsSL "${base}/Release" -o Release
+          cat Release
+          grep -qx "Origin: sems" Release
+          grep -qx "Label: sems" Release
+          grep -qx "Suite: ${{ matrix.distro }}" Release
+          grep -qx "Codename: ${{ matrix.distro }}" Release
+
           docker run --rm "${{ matrix.image }}" bash -lc "
             set -e
             export DEBIAN_FRONTEND=noninteractive
