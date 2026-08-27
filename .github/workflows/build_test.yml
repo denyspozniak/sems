@@ -112,14 +112,18 @@ jobs:
               cd "$dest"
               dpkg-scanpackages --multiversion . > Packages
               gzip -9kf Packages
+              # Write Release outside the directory first: a redirect would
+              # create the file before apt-ftparchive walks the tree, and it
+              # would then hash its own half-written self.
               apt-ftparchive \
-                -o APT::FTPArchive::Release::Origin=denyspozniak \
+                -o APT::FTPArchive::Release::Origin=sems \
                 -o APT::FTPArchive::Release::Label=sems \
                 -o APT::FTPArchive::Release::Suite="$distro" \
                 -o APT::FTPArchive::Release::Codename="$distro" \
                 -o APT::FTPArchive::Release::Architectures=amd64 \
                 -o APT::FTPArchive::Release::Components=main \
-                release . > Release
+                release . > ../Release.tmp
+              mv ../Release.tmp Release
             )
             found=1
             echo "indexed ${distro}:"
