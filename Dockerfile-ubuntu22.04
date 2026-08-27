@@ -34,7 +34,13 @@ RUN ln -s pkg/deb/bullseye ./debian
 # PKG_VERSION from CI makes successive builds upgradable via apt (apt compares
 # version strings only). Falls back to VERSION for a plain local build.
 ARG PKG_VERSION=
-RUN v="${PKG_VERSION:-$(cat VERSION)}" && \
+RUN set -eu; \
+    v="${PKG_VERSION:-$(cat VERSION)}"; \
+    changelog="$(dpkg-parsechangelog -S Version)"; \
+    if ! dpkg --compare-versions "$v" ge "$changelog"; then \
+        echo "refusing to build $v: older than debian/changelog $changelog" >&2; \
+        exit 1; \
+    fi; \
     DEBEMAIL="ci@localhost" DEBFULLNAME="CI" dch -b -v "$v" "sems"
 
 RUN dpkg-buildpackage -rfakeroot -us -uc
