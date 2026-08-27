@@ -22,17 +22,27 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - uses: actions/checkout@v5
       - id: set
         run: |
           python3 <<'PY'
-          import glob, json, os
+          import glob, json, os, re
           files = sorted(
               glob.glob("Dockerfile-debian[0-9]*")
               + glob.glob("Dockerfile-ubuntu*")
           )
-          include = [{"dockerfile": f, "distro": f.replace("Dockerfile-", "")} for f in files]
+          include = []
+          for f in files:
+              distro = f.replace("Dockerfile-", "")
+              # debian12 -> debian:12, ubuntu22.04 -> ubuntu:22.04, so the
+              # verify job installs into the matching base image.
+              match = re.match(r"(debian|ubuntu)(.+)", distro)
+              if not match:
+                  raise SystemExit(f"cannot derive a base image from {distro}")
+              include.append({"dockerfile": f, "distro": distro,
+                              "image": f"{match.group(1)}:{match.group(2)}"})
           if not include:
               raise SystemExit("no Dockerfile-debian* / Dockerfile-ubuntu* found")
           print("distros:", ", ".join(row["distro"] for row in include))
@@ -41,23 +51,12 @@ jobs:
               fh.write(f"matrix={matrix}\n")
           PY
 
-  apt_build:
-    name: apt ${{ matrix.distro }}
-    if: github.event_name == 'release' || github.ref == 'refs/heads/local_deb_repo'
-    needs: list_deb_dockerfiles
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.list_deb_dockerfiles.outputs.matrix) }}
-    steps:
-      - uses: actions/checkout@v5
-
+      # Computed once here so all five suites and the verify job agree.
       # A release publishes its tag as the package version. Anything else is a
       # snapshot and gets +ci<run_number>, which sorts above the release it was
       # built from and below the next one - apt compares version strings only,
       # so two builds sharing a version would be indistinguishable to clients.
-      - name: Compute package version
-        id: ver
+      - id: ver
         run: |
           set -eu
           tag="${{ github.event.release.tag_name }}"
@@ -79,10 +78,21 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "package version: ${version}"
 
+  apt_build:
+    name: apt ${{ matrix.distro }}
+    if: github.event_name == 'release' || github.ref == 'refs/heads/local_deb_repo'
+    needs: list_deb_dockerfiles
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.list_deb_dockerfiles.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v5
+
       - name: Build ${{ matrix.dockerfile }}
         run: |
           docker build -t "sems-${{ matrix.distro }}" \
-            --build-arg "PKG_VERSION=${{ steps.ver.outputs.version }}" \
+            --build-arg "PKG_VERSION=${{ needs.list_deb_dockerfiles.outputs.version }}" \
             -f "${{ matrix.dockerfile }}" .
 
       - name: Extract .deb packages
@@ -319,6 +329,54 @@ jobs:
 
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  # Install from the tree that was just published, in the base image each suite
+  # targets. This is the only check that exercises the repository the way a user
+  # does - a broken Release, a package pruned while still indexed, or a wrong
+  # Filename surface here and nowhere else.
+  apt_verify:
+    name: verify ${{ matrix.distro }}
+    if: github.event_name == 'release' || github.ref == 'refs/heads/local_deb_repo'
+    needs: [list_deb_dockerfiles, deploy_pages]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.list_deb_dockerfiles.outputs.matrix) }}
+    steps:
+      - name: Install sems from the published repository
+        env:
+          EXPECTED: ${{ needs.list_deb_dockerfiles.outputs.version }}
+        run: |
+          set -eu
+          repo="${{ github.repository }}"
+          base="https://${{ github.repository_owner }}.github.io/${repo#*/}/${{ matrix.distro }}"
+          echo "checking ${base} for ${EXPECTED}"
+
+          # Pages needs a moment to start serving a fresh deployment.
+          for attempt in $(seq 1 12); do
+            if curl -fsSL "${base}/Packages" | grep -qx "Version: ${EXPECTED}"; then
+              break
+            fi
+            echo "attempt ${attempt}: not served yet"
+            sleep 15
+          done
+          curl -fsSL "${base}/Packages" | grep -qx "Version: ${EXPECTED}"
+
+          docker run --rm "${{ matrix.image }}" bash -lc "
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq ca-certificates >/dev/null
+            echo 'deb [trusted=yes] ${base} ./' > /etc/apt/sources.list.d/sems.list
+            apt-get update
+            apt-get install -y sems
+            /usr/sbin/sems -v
+            installed=\"\$(dpkg-query -W -f='\${Version}' sems)\"
+            if [ \"\$installed\" != '${EXPECTED}' ]; then
+              echo \"installed \$installed, expected ${EXPECTED}\" >&2
+              exit 1
+            fi
+          "
 
   rpm_test_build:
     if: github.ref == 'refs/heads/master' || github.event_name == 'pull_request'
