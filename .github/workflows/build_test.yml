@@ -60,8 +60,22 @@ jobs:
         id: ver
         run: |
           set -eu
-          version="${{ github.event.release.tag_name }}"
-          [ -n "$version" ] || version="$(cat VERSION)+ci${{ github.run_number }}"
+          tag="${{ github.event.release.tag_name }}"
+          if [ -n "$tag" ]; then
+            # Releases are often tagged v2.1.0; a Debian version has to start
+            # with a digit, and the packaging is 3.0 (native), so it cannot
+            # carry a revision either.
+            version="${tag#v}"
+            case "$version" in
+              [0-9]*) ;;
+              *) echo "::error::release tag '$tag' does not start with a digit"; exit 1 ;;
+            esac
+            case "$version" in
+              *-*) echo "::error::release tag '$tag' has a revision, but the packaging is 3.0 (native)"; exit 1 ;;
+            esac
+          else
+            version="$(cat VERSION)+ci${{ github.run_number }}"
+          fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "package version: ${version}"
 
