@@ -8,6 +8,8 @@ on:
   pull_request:
     branches:
       - master
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -16,7 +18,7 @@ permissions:
 jobs:
   list_deb_dockerfiles:
     name: Discover Debian/Ubuntu Dockerfiles
-    if: github.ref == 'refs/heads/local_deb_repo'
+    if: github.event_name == 'release' || github.ref == 'refs/heads/local_deb_repo'
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
@@ -41,7 +43,7 @@ jobs:
 
   apt_build:
     name: apt ${{ matrix.distro }}
-    if: github.ref == 'refs/heads/local_deb_repo'
+    if: github.event_name == 'release' || github.ref == 'refs/heads/local_deb_repo'
     needs: list_deb_dockerfiles
     runs-on: ubuntu-latest
     strategy:
@@ -50,18 +52,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # apt decides whether to upgrade purely by comparing version strings, so a
-      # rebuilt 2.1.0 is invisible to clients. Derive a monotonic version instead:
-      # run_number always increases, and run_attempt disambiguates re-runs of the
-      # same commit. '+' sorts after the bare version, '~<suite>' keeps the five
-      # per-suite builds distinguishable.
+      # A release publishes its tag as the package version. Anything else is a
+      # snapshot and gets +ci<run_number>, which sorts above the release it was
+      # built from and below the next one - apt compares version strings only,
+      # so two builds sharing a version would be indistinguishable to clients.
       - name: Compute package version
         id: ver
         run: |
           set -eu
-          suffix="ci${{ github.run_number }}"
-          [ "${{ github.run_attempt }}" = "1" ] || suffix="${suffix}.${{ github.run_attempt }}"
-          version="$(cat VERSION)+${suffix}~${{ matrix.distro }}"
+          version="${{ github.event.release.tag_name }}"
+          [ -n "$version" ] || version="$(cat VERSION)+ci${{ github.run_number }}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "package version: ${version}"
 
@@ -86,7 +86,7 @@ jobs:
 
   apt_assemble:
     name: Assemble apt repo
-    if: always() && !cancelled() && github.ref == 'refs/heads/local_deb_repo'
+    if: always() && !cancelled() && (github.event_name == 'release' || github.ref == 'refs/heads/local_deb_repo')
     needs: apt_build
     runs-on: ubuntu-latest
     steps:
@@ -100,6 +100,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y dpkg-dev apt-utils
           mkdir -p apt-repo
+          # Where the current tree is published, so this run can carry it forward.
+          repo="${{ github.repository }}"
+          published="https://${{ github.repository_owner }}.github.io/${repo#*/}"
+          keep=3
           found=0
           for dir in collected/sems-*-debs; do
             [ -d "$dir" ] || continue
@@ -114,6 +118,44 @@ jobs:
               case "${deb##*/}" in *-dbg_*|*-dbgsym_*) continue ;; esac
               cp -a "$deb" "$dest"/
             done
+            # Carry the already published packages forward so a client can pin
+            # or roll back; the Pages deploy replaces the tree wholesale, so
+            # anything not re-uploaded here disappears from the index.
+            if curl -fsSL "${published}/${distro}/Packages" -o prev-Packages; then
+              awk '/^Filename: /{print $2}' prev-Packages | while read -r rel; do
+                case "${rel##*/}" in *-dbg_*|*-dbgsym_*) continue ;; esac
+                [ -e "$dest/${rel##*/}" ] && continue
+                curl -fsSL "${published}/${distro}/${rel#./}" \
+                  -o "$dest/${rel##*/}" || rm -f "$dest/${rel##*/}"
+              done
+              rm -f prev-Packages
+            else
+              echo "no published tree at ${published}/${distro} yet"
+            fi
+
+            # Keep the newest few versions of each package, dropping the rest.
+            python3 - "$dest" "$keep" <<'PRUNE'
+          import functools, os, subprocess, sys
+          dest, keep = sys.argv[1], int(sys.argv[2])
+          groups = {}
+          for f in os.listdir(dest):
+              if not f.endswith(".deb"):
+                  continue
+              name, version, _ = f[:-4].split("_", 2)
+              groups.setdefault(name, []).append((version, f))
+          def newest_first(a, b):
+              for rel, result in (("gt", -1), ("lt", 1)):
+                  if subprocess.run(["dpkg", "--compare-versions", a[0], rel, b[0]]).returncode == 0:
+                      return result
+              return 0
+          for name, items in sorted(groups.items()):
+              items.sort(key=functools.cmp_to_key(newest_first))
+              print(name, "->", ", ".join(v for v, _ in items[:keep]))
+              for _, f in items[keep:]:
+                  os.remove(os.path.join(dest, f))
+                  print("  pruned", f)
+          PRUNE
+
             (
               cd "$dest"
               dpkg-scanpackages --multiversion . > Packages
@@ -138,7 +180,15 @@ jobs:
           [ "$found" = 1 ] || { echo "no .deb artifacts to index"; exit 1; }
           {
             echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>sems apt</title></head><body>'
-            echo '<h1>sems apt repo</h1><p>Pick the distro matching the host:</p><pre>'
+            echo '<h1>sems apt repo</h1>'
+            echo '<p><strong>These packages are not signed.</strong> There is no'
+            echo 'GPG key and no InRelease file, so apt cannot verify who built'
+            echo 'them - that is why the line below needs [trusted=yes]. Only the'
+            echo 'HTTPS transport is authenticated. Use at your own risk, and do'
+            echo 'not point production hosts at this repository.</p>'
+            echo '<p>The newest few builds of each package are kept; older ones'
+            echo 'are removed when a new build is published.</p>'
+            echo '<p>Pick the distro matching the host:</p><pre>'
             for dest in apt-repo/*/; do
               distro="$(basename "$dest")"
               echo "echo \"deb [trusted=yes] https://HOST/${distro} ./\" | sudo tee /etc/apt/sources.list.d/sems.list"
@@ -167,7 +217,7 @@ jobs:
   # on always() and would happily index a partial set).
   deploy_pages:
     name: Deploy apt repo to Pages
-    if: github.ref == 'refs/heads/local_deb_repo'
+    if: github.event_name == 'release' || github.ref == 'refs/heads/local_deb_repo'
     needs: [apt_build, apt_assemble]
     runs-on: ubuntu-latest
     permissions:
