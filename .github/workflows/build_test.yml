@@ -173,6 +173,47 @@ jobs:
                 release . > ../Release.tmp
               mv ../Release.tmp Release
             )
+
+            # Pages serves no directory listing, so give each suite its own.
+            # Generated after Release so it is not part of the indexed files.
+            python3 - "$dest" "$distro" <<'SUITEINDEX'
+          import os, sys
+          dest, distro = sys.argv[1], sys.argv[2]
+          rows, stanza = [], {}
+          with open(os.path.join(dest, "Packages"), encoding="utf-8") as fh:
+              for line in fh:
+                  line = line.rstrip("\n")
+                  if not line:
+                      if stanza:
+                          rows.append(stanza); stanza = {}
+                      continue
+                  if not line.startswith(" ") and ": " in line:
+                      key, value = line.split(": ", 1)
+                      stanza[key] = value
+          if stanza:
+              rows.append(stanza)
+          rows.sort(key=lambda r: (r.get("Package", ""), r.get("Version", "")))
+          out = ['<!DOCTYPE html><html><head><meta charset="utf-8">',
+                 f'<title>sems apt - {distro}</title></head><body>',
+                 f'<h1>sems apt repo - {distro}</h1>',
+                 '<p><a href="../">suite list and install instructions</a>.',
+                 'These packages are not signed.</p>',
+                 '<table border="1" cellpadding="4" cellspacing="0">',
+                 '<tr><th>package</th><th>version</th><th>size</th><th>file</th></tr>']
+          for r in rows:
+              name = r.get("Filename", "./").rsplit("/", 1)[-1]
+              size = int(r.get("Size", 0)) / 1048576
+              out.append(f'<tr><td>{r.get("Package","")}</td><td>{r.get("Version","")}</td>'
+                         f'<td align="right">{size:.1f} MB</td>'
+                         f'<td><a href="{name}">{name}</a></td></tr>')
+          out += ['</table>',
+                  '<p><a href="Packages">Packages</a> | <a href="Release">Release</a></p>',
+                  '</body></html>']
+          with open(os.path.join(dest, "index.html"), "w", encoding="utf-8") as fh:
+              fh.write("\n".join(out) + "\n")
+          print(f"index.html for {distro}: {len(rows)} packages")
+          SUITEINDEX
+
             found=1
             echo "indexed ${distro}:"
             ls -al "$dest"
@@ -190,6 +231,12 @@ jobs:
             echo 'repository.</p>'
             echo '<p>The newest few builds of each package are kept; older ones'
             echo 'are removed when a new build is published.</p>'
+            echo '<p>Browse the repository:'
+            for dest in apt-repo/*/; do
+              distro="$(basename "$dest")"
+              echo "<a href=\"${distro}/\">${distro}</a>"
+            done
+            echo '</p>'
             echo '<p>Pick the distro matching the host:</p><pre>'
             for dest in apt-repo/*/; do
               distro="$(basename "$dest")"
