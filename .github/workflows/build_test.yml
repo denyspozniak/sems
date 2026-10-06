@@ -33,22 +33,32 @@ jobs:
 
   deb_test_build:
     runs-on: ubuntu-latest
+    name: deb_test_build (${{ matrix.dist }})
+    strategy:
+      fail-fast: false
+      matrix:
+        dist: [debian12, debian13, ubuntu24.04, ubuntu26.04]
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
 
-      - name: Build image based on Debian 12
-        run: docker build -t sems_deb12 -f Dockerfile-debian12 .
+      - name: Build image based on ${{ matrix.dist }}
+        run: docker build -t sems_${{ matrix.dist }} -f Dockerfile-${{ matrix.dist }} .
 
-      - name: Build image based on Debian 13
-        run: docker build -t sems_deb13 -f Dockerfile-debian13 .
+      # dpkg-buildpackage leaves the packages next to the source tree, in /
+      - name: Copy the packages out of the image
+        run: |
+          mkdir debs
+          docker run --rm -v "$PWD/debs:/out" sems_${{ matrix.dist }} sh -c 'cp /*.deb /out/'
+          ls -l debs
 
-      - name: Build image based on Ubuntu 24.04
-        run: docker build -t sems_ubuntu2404 -f Dockerfile-ubuntu24.04 .
-
-      - name: Build image based on Ubuntu 26.04
-        run: docker build -t sems_ubuntu2604 -f Dockerfile-ubuntu26.04 .
+      - name: Upload the packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: sems-debs-${{ matrix.dist }}
+          path: debs/*.deb
+          if-no-files-found: error
 
   hardened_builds:
     runs-on: ubuntu-latest
